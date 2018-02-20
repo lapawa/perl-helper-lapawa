@@ -7,9 +7,13 @@ exportVirtualMachineInfos.pl
 
 =head1 DESCRIPTION
 
-Iterate over all Virtual Machines in a vCenter Server and print several information about them.
+Iterate over all Virtual Machines in a vCenter Server or Datacenter element and print several information about them in JSON format.
+--operation export 
   - Name of Virtual Machine
   - Virtual Machine Folder
+  
+--operation movevms
+Picks the JSON file from 'export' and moves virtual machines to existing folders.
 
 =head1 AUTHOR
 
@@ -36,6 +40,11 @@ my %opts = (
         help => "Operation can be one of 'export' or 'movevms'. Defaults is export.",
         required => 0,
     },
+	datacenter => {
+		type => "=s",
+		required => 0,
+		help => "Datacenter name. Select a single datacenter to process.",
+	},
 );
 
 # List of object properties to request vom vCenter Server
@@ -48,6 +57,7 @@ Opts::parse();
 Opts::validate();
 my $operation          = Opts::get_option('operation');
 my $inventory_filename = Opts::get_option('inventoryfile');
+my $opt_datacenter     = Opts::get_option('datacenter');
 
 # Check combination of options:
 if (!defined $operation or lc $operation eq 'export') {
@@ -282,66 +292,80 @@ traverse_snapshot_vm_folder{
         $views = undef;
 
         # Handle Virtual machines
-        my @move_these_virtual_machines_morefs;
-        print "\n\tExpecting #". scalar @{$$snapshot_{'vms'}} ." virtual machines...";
-        foreach my $snap_vm (@{$$snapshot_{'vms'}}) {
-            my $uuid = $$snap_vm{'uuid'};
+        if ( exists $$snapshot_{vms}) {
 
-            unless ( exists $folder_vm_views_by_uuid{$uuid}) {
-                print "\n\tMissing vm(".$$snap_vm{'name'}."). Searching by uuid(".$uuid.")...";
-
-                # find in folder missing virtual machine
-                my $vm_view = find_vm_view_by_uuid($datacenter_, $uuid);
-                if (defined $vm_view) {
-                    #my $vm_folder = Util::get_inventory_path($vm_view, $$mo_view_{'vim'} );
-                    print " found it";# folder(".$vm_folder.").";
-                    push @move_these_virtual_machines_morefs, $$vm_view{'mo_ref'};
+            my @move_these_virtual_machines_morefs;
+            print "\n\tExpecting #". scalar @{$$snapshot_{'vms'}} ." virtual machines...";
+            foreach my $snap_vm (@{$$snapshot_{'vms'}}) {
+                my $uuid = $$snap_vm{'uuid'};
+    
+                unless ( exists $folder_vm_views_by_uuid{$uuid}) {
+                    print "\n\tMissing vm(".$$snap_vm{'name'}."). Searching by uuid(".$uuid.")...";
+    
+                    # find in folder missing virtual machine
+                    my $vm_view = find_vm_view_by_uuid($datacenter_, $uuid);
+                    if (defined $vm_view) {
+                        #my $vm_folder = Util::get_inventory_path($vm_view, $$mo_view_{'vim'} );
+                        print " found it";# folder(".$vm_folder.").";
+                        push @move_these_virtual_machines_morefs, $$vm_view{'mo_ref'};
+                    }
                 }
             }
-        }
-
-        if (scalar @move_these_virtual_machines_morefs) {
-            print "\n\tInitiating move of #".scalar @move_these_virtual_machines_morefs." missing virtual machine(s) back to folder(".$name.")...";
-            $mo_view_->MoveIntoFolder( list => \@move_these_virtual_machines_morefs );
-            print "done";
-        } else {
-            print " found all of them. Nothing to move. Good!";
-        }
-
-        # Get views of all sub folders:
-        $views = Vim::get_views(
-                    mo_ref_array => \@folder_morefs,
-                    view_type    => 'Folder',
-                    properties   => \@FOLDER_PROPERTIES,
-        );
-        # sort them by name
-        my %subfolder_views_by_name;
-        foreach my $view (@$views){
-            $subfolder_views_by_name{$$view{'name'}} = $view;
-        }
-        $views = undef;
-        
-        # Handle the folders:
-        foreach my $snap_folder (@{$$snapshot_{'vmFolder'}}){
-            # Search matching folder in views
-            if ( exists $subfolder_views_by_name{$$snap_folder{'name'}}) {
-                traverse_snapshot_vm_folder( $datacenter_, $snap_folder, $subfolder_views_by_name{$$snap_folder{'name'}} );
-            } else {
-                # TODO: Create missing folder. Wait for vCenter and traverse into it
-                print STDERR "\nMissing folder(".$$snap_folder{'name'}."). Please create manually. SKIPPING!";
-            }
-        }
-    }
     
+            if (scalar @move_these_virtual_machines_morefs) {
+                print "\n\tInitiating move of #".scalar @move_these_virtual_machines_morefs." missing virtual machine(s) back to folder(".$name.")...";
+                $mo_view_->MoveIntoFolder( list => \@move_these_virtual_machines_morefs );
+                print "done";
+            } else {
+                print " found all of them. Nothing to move. Good!";
+            }
+        } # if snapshot section 'vms' exists
+        
+        if ( exists $$snapshot_{'vmFolder'}) {
+            
+            # Get views of all sub folders:
+            $views = Vim::get_views(
+                        mo_ref_array => \@folder_morefs,
+                        view_type    => 'Folder',
+                        properties   => \@FOLDER_PROPERTIES,
+            );
+            # sort them by name
+            my %subfolder_views_by_name;
+            foreach my $view (@$views){
+                $subfolder_views_by_name{$$view{'name'}} = $view;
+            }
+            $views = undef;
+            
+            # Handle the folders:
+            foreach my $snap_folder (@{$$snapshot_{'vmFolder'}}){
+                # Search matching folder in views
+                if ( exists $subfolder_views_by_name{$$snap_folder{'name'}}) {
+                    traverse_snapshot_vm_folder( $datacenter_, $snap_folder, $subfolder_views_by_name{$$snap_folder{'name'}} );
+                } else {
+                    # TODO: Create missing folder. Wait for vCenter and traverse into it
+                    print STDERR "\nMissing folder(".$$snap_folder{'name'}."). Please create manually. SKIPPING!";
+                }
+            }
+        } # if snapshot{vmFolder} exists 
+    } # if mo_view type eq 'Folder'
 } # traverse_snapshot_vm_folder
 
 
 if($operation eq 'export'){
     
-    my $datacenter_views = Vim::find_entity_views(
-        view_type  => 'Datacenter',
-        properties => [ 'name', 'vmFolder']
-    );
+    my $datacenter_views;
+    if ( defined $opt_datacenter ) {
+        $datacenter_views = Vim::find_entity_views(
+            view_type  => 'Datacenter',
+            filter => { 'name' => $opt_datacenter },
+            properties => [ 'name', 'vmFolder'],
+        );
+    } else {
+        $datacenter_views = Vim::find_entity_views(
+            view_type  => 'Datacenter',
+            properties => [ 'name', 'vmFolder']
+        );        
+    }
     
     my @datacenters = ();
     foreach my $datacenter_view (@$datacenter_views){
@@ -372,6 +396,11 @@ if($operation eq 'export'){
     foreach my $dc_snapshot (@$datacenters){
         my $dc_name = $$dc_snapshot{name};
         
+        # Find datacenter selected by command line option
+        if ( defined $opt_datacenter && !($dc_name eq $opt_datacenter)) {
+            next;
+        }
+        
         my $dc_view = Vim::find_entity_view(
             view_type  => 'Datacenter',
             filter     => { 'name'=> $dc_name },
@@ -382,8 +411,6 @@ if($operation eq 'export'){
             print STDERR "Failed to find datacenter '".$dc_name."'. SKIPPING!";
             next;
         }
-
-        #$dc_snapshot->{'view'} = ;
 
         traverse_snapshot_vm_folder($dc_view, $dc_snapshot, $dc_view);
         print " done\n";
